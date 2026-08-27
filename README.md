@@ -1,4 +1,4 @@
-# rfcdiff
+=# rfcdiff
 
 [rfcdiff web service](https://author-tools.ietf.org/iddiff) | [rfcdiff script](https://github.com/ietf-tools/rfcdiff/raw/main/rfcdiff)
 
@@ -13,7 +13,7 @@ formats:
 In all cases, internet-draft headers and footers are stripped before generating the diff, to produce a cleaner diff.
 
 ## Usage
-```
+```yang
     rfcdiff [options] file1 file2
 
     rfcdiff takes two RFCs or Internet-Drafts in text form as input, and
