@@ -1,0 +1,190 @@
+# ======================================================================
+# 1. OPTION DEFAULTS & CLI PARSER INTEGRATION
+# ======================================================================
+opthtml=1; optdiff=0; optchbars=0; optwdiff=0; optshow=0; optnowdiff=0;
+optkeep=0; optinfo=0; optwidth=0;  optnums=0;  optbody=0; optabdiff=0;
+optstrip=1; opthwdiff=0; optlinks=0; optfold=0;
+optoldcolour="red"; optnewcolour="green"; optlarger=""
+optstdout=0;
+
+# Advanced diff control options
+optdiffalg=""
+LINE_THRESHOLD=5000
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --html)   opthtml=1; optdiff=0; optchbars=0; optwdiff=0; opthwdiff=0; optabdiff=0;;
+        --diff)   opthtml=0; optdiff=1; optchbars=0; optwdiff=0; opthwdiff=0; optabdiff=0;;
+        --chbars) opthtml=0; optdiff=0; optchbars=1; optwdiff=0; opthwdiff=0; optabdiff=0;;
+        --wdiff)  opthtml=0; optdiff=0; optchbars=0; optwdiff=1; opthwdiff=0; optabdiff=0;;
+        --hwdiff) opthtml=0; optdiff=0; optchbars=0; optwdiff=0; opthwdiff=1; optabdiff=0;;
+        --abdiff|--ab-diff|--changes) opthtml=0; optdiff=0; optchbars=0; optwdiff=0; opthwdiff=0; optabdiff=1;;
+        --version) echo -e "$basename\t$version\t$progdate"; exit 0;;
+        --browse) optshow=1;;
+        --keep)   optkeep=1;;
+        --width)  optwidth=$2; shift;;
+        --context)prelines=$2; shift;;
+        --patience)  optdiffalg="--patience";;
+        --histogram) optdiffalg="--histogram";;
+        --threshold) LINE_THRESHOLD="$2"; shift;;
+        --stdout) optstdout=1;;
+        --)       shift; break;;
+        -*)       echo "Unrecognized option: $1"; exit 1;;
+        *)        break;;
+    esac
+    shift
+done
+
+# ======================================================================
+# 2. BINARY RESOLUTION & ALGORITHM FALLBACK LOGIC
+# ======================================================================
+gitbin=$(lookfor git)
+diffstatbin=$(lookfor diffstat)
+diffbin=$(lookfor diff)
+
+if [ -z "$diffbin" ] && [ -z "$gitbin" ]; then
+    die "$0: Error: Neither 'git' nor 'diff' executable was found."
+fi
+
+# Choose base diff engine
+if [ -n "$gitbin" ]; then
+    DIFFCMD="$gitbin diff --no-index --color=never"
+    diffver=$($gitbin --version 2>/dev/null | head -n 1)
+else
+    DIFFCMD="$diffbin"
+    diffver=$($diffbin --version 2>/dev/null | head -n 1)
+fi
+
+awkbin=$AWK
+awkver=$($awkbin --version 2>/dev/null | head -n 1)
+uname=$(uname -s -r -m 2>/dev/null || uname -a)
+
+export diffbin="$DIFFCMD"
+export diffver
+export awkbin
+export awkver
+export uname
+export cmdline="$0 $*"
+export jsinc=""
+
+# ======================================================================
+# 3. DYNAMIC FLAG CONSTRUCTION & THRESHOLD CHECKING
+# ======================================================================
+diffflags="-U${prelines:-10}"
+
+if [ "$optnospacechange" = "1" ]; then
+    if [ -n "$gitbin" ]; then diffflags="$diffflags --ignore-space-at-eol"; else diffflags="$diffflags -b"; fi
+fi
+
+if [ "$optignorewhite" = "1" ]; then
+    diffflags="$diffflags -w"
+fi
+
+# Determine algorithm or map GNU fallback
+if [ -n "$optdiffalg" ]; then
+    if [ -n "$gitbin" ]; then
+        diffflags="$diffflags $optdiffalg"
+    else
+        case "$optdiffalg" in
+            --patience|--histogram)
+                echo "Notice: Git binary unavailable. Mapping $optdiffalg to GNU diff '--minimal'." >&2
+                diffflags="$diffflags --minimal"
+                ;;
+        esac
+    fi
+else
+    # Auto-enable --minimal for large files if no explicit algorithm is set and Git is absent
+    lines1=$(wc -l < "$workdir/1/$base1" 2>/dev/null || echo 0)
+    lines2=$(wc -l < "$workdir/2/$base2" 2>/dev/null || echo 0)
+    max_lines=$(( lines1 > lines2 ? lines1 : lines2 ))
+
+    if [ "$max_lines" -gt "$LINE_THRESHOLD" ] && [ -z "$gitbin" ]; then
+        echo "Notice: Document ($max_lines lines) exceeds threshold ($LINE_THRESHOLD). Auto-enabling '--minimal'." >&2
+        diffflags="$diffflags --minimal"
+    fi
+fi
+
+# Determine output destination
+if [ $optstdout -gt 0 ]; then
+    outtarget="/dev/stdout"
+else
+    outtarget="$outfile"
+fi
+
+# ======================================================================
+# 4. EXECUTION PIPELINE & RENDERING
+# ======================================================================
+
+# Optionally prepend diffstat visual overview to HTML output
+if [ -n "$diffstatbin" ] && [ $opthtml -gt 0 ] && [ $optstdout -eq 0 ]; then
+    echo '<div class="stats-header" style="background:#f4f4f4; padding:10px; border-bottom:1px solid #ccc;"><pre>' > "$outtarget"
+    $DIFFCMD -u "$workdir/1/$base1" "$workdir/2/$base2" | $diffstatbin -c -t -p1 >> "$outtarget"
+    echo '</pre></div>' >> "$outtarget"
+fi
+
+if [ $opthtml -gt 0 ]; then
+    (
+        cd "$workdir" || exit 1
+        $DIFFCMD $diffflags 1/"$base1" 2/"$base2" | htmldiff
+    ) >> "$outtarget"
+
+elif [ $opthwdiff -gt 0 ]; then
+    cat << EOF > "$outtarget"
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+  <title>Diff: $base1 - $base2</title>
+  <style type="text/css">
+    body { font-family: monospace; white-space: pre; margin: 1em; }
+    .old { color: $optoldcolour; text-decoration: line-through; }
+    .new { color: $optnewcolour; font-weight: bold; }
+  </style>
+</head>
+<body>
+EOF
+    if [ -n "$wdiffbin" ]; then
+        $wdiffbin -w '<span class="old">' -x '</span>' -y '<span class="new">' -z '</span>' \
+            $optwdiffargs "$workdir/1/$base1" "$workdir/2/$base2" >> "$outtarget"
+    fi
+    echo "</body></html>" >> "$outtarget"
+
+elif [ $optwdiff -gt 0 ]; then
+    if [ -n "$wdiffbin" ]; then
+        $wdiffbin $optwdiffargs "$workdir/1/$base1" "$workdir/2/$base2" > "$outtarget"
+    else
+        die "$0: Error: 'wdiff' executable is required for --wdiff mode."
+    fi
+
+elif [ $optabdiff -gt 0 ]; then
+    $DIFFCMD -u -U 0 "$workdir/1/$base1" "$workdir/2/$base2" | abdiff > "$outtarget"
+
+elif [ $optchbars -gt 0 ]; then
+    $DIFFCMD $diffflags "$workdir/1/$base1" "$workdir/2/$base2" | $AWK '
+        /^\+[^\+]/ { print "| " substr($0, 2); next; }
+        /^-[^-]/   { next; }
+        /^ /       { print "  " substr($0, 2); next; }
+    ' > "$outtarget"
+
+elif [ $optdiff -gt 0 ]; then
+    $DIFFCMD $diffflags "$workdir/1/$base1" "$workdir/2/$base2" > "$outtarget"
+fi
+
+# ======================================================================
+# 5. BROWSER LAUNCH & CLEANUP
+# ======================================================================
+if [ $optshow -gt 0 ]; then
+    if [ $optstdout -gt 0 ]; then
+        echo "Warning: Cannot use --browse when output is directed to stdout." >&2
+    else
+        browse "$outfile"
+    fi
+fi
+
+if [ $optkeep -eq 0 ]; then
+    rm -rf "$workdir"
+else
+    echo "Temporary work files kept in: $workdir" >&2
+fi
+
+exit 0
